@@ -1,0 +1,430 @@
+---
+title: "Untitled"
+author: "Sandra Bernaus Tomé"
+date: "12/6/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Selección de muestras aleatoriamente 
+
+```{r}
+counts<-read.csv("./counts.csv", sep = ";")
+targets<-read.csv("./targets.csv", sep = ",")
+```
+
+```{r}
+library(stringr)
+set.seed(123)
+NIT_sample<-sample(c(1:236),10)
+SFI_sample<-sample(c(1:42),10)
+ELI_sample<-sample(c(1:14),10)
+
+NIT<-targets[targets$Group=="NIT",][NIT_sample,]
+SFI<-targets[targets$Group=="SFI",][SFI_sample,]
+ELI<-targets[targets$Group=="ELI",][ELI_sample,]
+
+
+target<-rbind(NIT,SFI,ELI)
+target$Sample_Name<-str_replace_all(target$Sample_Name,"-",".")
+
+colnames(counts)<-str_replace_all(colnames(counts),"-",".")
+count<-counts[,target$Sample_Name]
+
+row.names(count)<-counts$X
+row.names(count) <- gsub("\\..*", "", row.names(count), fixed = FALSE)
+rownames(target)<-target$Sample_Name
+
+```
+
+## Control de calidad
+```{r}
+library(DESeq2)
+library(ggplot2)
+
+all(rownames(target) %in% colnames(count))
+count <- count[, rownames(target)]
+all(rownames(target) == colnames(count))
+
+
+dds <- DESeqDataSetFromMatrix(countData = count,
+                              colData = target,
+                              design= ~ Group)
+featureData <- data.frame(gene=rownames(count))
+mcols(dds) <- DataFrame(mcols(dds), featureData)
+mcols(dds)
+```
+
+```{r}
+boxplot(assay(dds))
+```
+```{r}
+mds <- as.data.frame(colData(dds))  %>%
+         cbind(cmdscale(sampleDistMatrix))
+ggplot(mds, aes(x = `1`, y = `2`, color = Group)) +
+  geom_point(size = 3) + coord_fixed()
+```
+
+## Filtramos los datos y reducimos el tamaño de los contajes:
+
+```{r}
+nrow(dds)
+dds <- dds[ rowSums(counts(dds)) > 1, ]
+nrow(dds)
+```
+
+## Normalización:
+Minimizando las diferencias entre las muestras para las filas con recuentos pequeños, y que se normaliza con respecto al tamaño de la biblioteca.
+```{r}
+rld <- rlog(dds, blind = FALSE)
+head(assay(rld), 3)
+colData(rld)
+
+boxplot(assay(rld))
+```
+
+## Visualización de la relacion de las muestras
+Distancia entre muestras
+```{r}
+sampleDists <- dist(t(assay(rld)))
+
+library("pheatmap")
+library("RColorBrewer")
+
+sampleDistMatrix <- as.matrix( sampleDists )
+rownames(sampleDistMatrix) <- rld$Group
+colnames(sampleDistMatrix) <- NULL
+colors <- colorRampPalette( rev(brewer.pal(9, "Blues")) )(255)
+pheatmap(sampleDistMatrix,
+         clustering_distance_rows = sampleDists,
+         clustering_distance_cols = sampleDists,
+         col = colors)
+```
+
+
+```{r}
+plotPCA(rld, intgroup = c("Group"))
+```
+Las diferencias entre los grupos SFI parece crear ningún cluster. g y nit no son muy notables, en cambio entre eli y nit parece que si que podemos hacer dos grupos bien diferenciados.
+
+# NIT vs ELI
+##Analisis de genes diferencialmente expresados
+
+```{r}
+dds <- DESeq(dds, parallel =TRUE)
+res <- results(dds, contrast=c("Group","NIT","ELI"))
+summary(res)
+
+resSig <- subset(res, padj < 0.1)
+#down-regulated
+head(resSig[ order(resSig$log2FoldChange), ])
+#up-regulated
+head(resSig[ order(resSig$log2FoldChange, decreasing = TRUE), ])
+
+```
+
+
+## Anotación
+```{r}
+library(org.Hs.eg.db)
+resSig$symbol <- mapIds(org.Hs.eg.db,
+                     keys=row.names(resSig),
+                     column="SYMBOL",
+                     keytype="ENSEMBL",
+                     multiVals="first")
+
+resSig$entrez <- mapIds(org.Hs.eg.db,
+                     keys=row.names(resSig),
+                     column="ENTREZID",
+                     keytype="ENSEMBL",
+                     multiVals="first")
+resSig <- resSig[order(resSig$pvalue),]
+```
+
+## Significación Biologica
+
+```{r}
+mapped_genes2GO <- mappedkeys(org.Hs.egGO)
+mapped_genes2KEGG <- mappedkeys(org.Hs.egPATH)
+mapped_genes <- union(mapped_genes2GO , mapped_genes2KEGG)
+```
+
+```{r}
+library(clusterProfiler)
+genesIn <- resSig$entrez
+genesIn<-genesIn[!is.na(genesIn)]
+universe <- mapped_genes
+enrich.result <- enrichGO(gene= genesIn,
+            universe = universe,
+            OrgDb = org.Hs.eg.db,
+            ont = "CC",
+            pAdjustMethod = "BH",
+            pvalueCutoff  = 0.05)
+print(length(enrich.result@result$Description))
+print(head(enrich.result@result$Description))
+```
+# NIT vs SFI
+## Analisis de genes diferencialmente expresados
+```{r}
+res <- results(dds, contrast=c("Group","NIT","SFI"))
+summary(res)
+
+resSig <- subset(res, padj < 0.1)
+#down-regulated
+head(resSig[ order(resSig$log2FoldChange), ])
+#up-regulated
+head(resSig[ order(resSig$log2FoldChange, decreasing = TRUE), ])
+```
+
+## Annotación
+```{r}
+library(org.Hs.eg.db)
+resSig$symbol <- mapIds(org.Hs.eg.db,
+                     keys=row.names(resSig),
+                     column="SYMBOL",
+                     keytype="ENSEMBL",
+                     multiVals="first")
+
+resSig$entrez <- mapIds(org.Hs.eg.db,
+                     keys=row.names(resSig),
+                     column="ENTREZID",
+                     keytype="ENSEMBL",
+                     multiVals="first")
+resSig <- resSig[order(resSig$pvalue),]
+```
+
+## Significación Biologica
+```{r}
+library(clusterProfiler)
+genesIn <- resSig$entrez
+genesIn<-genesIn[!is.na(genesIn)]
+universe <- mapped_genes
+enrich.result <- enrichGO(gene= genesIn,
+            universe = universe,
+            OrgDb = org.Hs.eg.db,
+            ont = "CC",
+            pAdjustMethod = "BH",
+            pvalueCutoff  = 0.05)
+print(length(enrich.result@result$Description))
+print(head(enrich.result@result$Description))
+```
+
+# SFI vs ELI
+## Analisis de genes diferencialmente expresados
+```{r}
+res <- results(dds, contrast=c("Group","SFI","ELI"))
+summary(res)
+
+resSig <- subset(res, padj < 0.1)
+#down-regulated
+head(resSig[ order(resSig$log2FoldChange), ])
+#up-regulated
+head(resSig[ order(resSig$log2FoldChange, decreasing = TRUE), ])
+```
+
+## Annotación
+```{r}
+library(org.Hs.eg.db)
+resSig$symbol <- mapIds(org.Hs.eg.db,
+                     keys=row.names(resSig),
+                     column="SYMBOL",
+                     keytype="ENSEMBL",
+                     multiVals="first")
+
+resSig$entrez <- mapIds(org.Hs.eg.db,
+                     keys=row.names(resSig),
+                     column="ENTREZID",
+                     keytype="ENSEMBL",
+                     multiVals="first")
+resSig <- resSig[order(resSig$pvalue),]
+```
+
+## Significación Biologica
+```{r}
+library(clusterProfiler)
+genesIn <- resSig$entrez
+genesIn<-genesIn[!is.na(genesIn)]
+universe <- mapped_genes
+enrich.result <- enrichGO(gene= genesIn,
+            universe = universe,
+            OrgDb = org.Hs.eg.db,
+            ont = "CC",
+            pAdjustMethod = "BH",
+            pvalueCutoff  = 0.05)
+
+print(length(enrich.result@result$Description))
+print(head(enrich.result@result$Description))
+```
+
+# Comparaión entre grupos
+
+```{r}
+library(limma)
+design<-model.matrix(~0+Group, target)
+colnames(design)
+contr.matrix<-makeContrasts (NITvsSFI = GroupNIT-GroupSFI,
+                             NITvsELI = GroupNIT-GroupELI,
+                             SFIvsELI = GroupSFI-GroupELI,
+                             levels=design)
+contr.matrix
+```
+
+## Normalización
+
+Normalizamos los contajes mediante la función `voom`:
+```{r}
+v<-voom(count, design)
+fit <- lmFit(v)
+names(fit)
+fit.cont <- contrasts.fit(fit, contr.matrix)
+fit.main<-eBayes(fit.cont)
+class(fit.main)
+```
+
+Heatmap:
+```{r}
+library(gplots)
+head(fit.main$p.value)
+
+select_top  <- p.adjust(fit.main$p.value[, 2]) <1e-2
+Exp_top <- v$E[select_top, ]
+heatmap.2(Exp_top, scale="row", density.info="none", trace="none", main="Top DEGs", cexRow=0.4, cexCol=0.8)
+
+```
+
+## Lista de los genes diferencialmente expresados
+```{r}
+NITvsELI <- topTable(fit.main, number=nrow(fit.main), coef="NITvsELI", adjust="fdr") 
+head(NITvsELI)
+NITvsSFI<-topTable(fit.main, number=nrow(fit.main), coef="NITvsSFI", adjust="fdr")
+SFIvsELI<-topTable(fit.main, number=nrow(fit.main), coef="SFIvsELI", adjust="fdr")
+```
+
+## Annotación genes differencialmente expresados:
+```{r}
+library(org.Hs.eg.db)
+topAnnotated_NITvsELI<-select(org.Hs.eg.db, rownames(NITvsELI), column=c("SYMBOL", "ENTREZID", "GENENAME"), keytype="ENSEMBL", multiVals="first")
+NITvsELI<-cbind(PROBEID=rownames(NITvsELI),NITvsELI)
+topAnnotated_NITvsELI<-merge(x=topAnnotated_NITvsELI, y=NITvsELI, by.x="ENSEMBL" , by.y="PROBEID")
+
+topAnnotated_NITvsSFI<-select(org.Hs.eg.db, rownames(NITvsSFI), column=c("SYMBOL", "ENTREZID", "GENENAME"), keytype="ENSEMBL", multiVals="first")
+NITvsSFI<-cbind(PROBEID=rownames(NITvsSFI),NITvsSFI)
+topAnnotated_NITvsSFI<-merge(x=topAnnotated_NITvsSFI, y=NITvsSFI, by.x="ENSEMBL" , by.y="PROBEID")
+
+topAnnotated_SFIvsELI<-select(org.Hs.eg.db, rownames(SFIvsELI), column=c("SYMBOL", "ENTREZID", "GENENAME"), keytype="ENSEMBL", multiVals="first")
+SFIvsELI<-cbind(PROBEID=rownames(SFIvsELI),SFIvsELI)
+topAnnotated_SFIvsELI<-merge(x=topAnnotated_SFIvsELI, y=SFIvsELI, by.x="ENSEMBL" , by.y="PROBEID")
+
+
+dir.create("./results")
+write.csv(topAnnotated_NITvsELI, file="./results/topAnnotated_NITvsELI.csv")
+write.csv(topAnnotated_NITvsSFI, file="./results/topAnnotated_NITvsSFI.csv")
+write.csv(topAnnotated_SFIvsELI, file="./results/topAnnotated_SFIvsELI.csv")
+
+```
+
+## Visualización de la expresión diferencial
+
+```{r}
+geneSymbols <- select(org.Hs.eg.db, rownames(fit.main), c("SYMBOL"),keytype="ENSEMBL")
+SYMBOLS<- geneSymbols$SYMBOL
+volcanoplot(fit.main, coef=1, highlight=4, names=SYMBOLS, 
+             main=paste("Differentially expressed genes", colnames(contr.matrix)[1], sep="\n"))
+abline(v=c(-1,1))
+
+volcanoplot(fit.main, coef=2, highlight=4, names=SYMBOLS, 
+             main=paste("Differentially expressed genes", colnames(contr.matrix)[1], sep="\n"))
+abline(v=c(-1,1))
+
+volcanoplot(fit.main, coef=3, highlight=4, names=SYMBOLS, 
+             main=paste("Differentially expressed genes", colnames(contr.matrix)[1], sep="\n"))
+abline(v=c(-1,1))
+```
+
+## Comparación multiple
+
+```{r}
+res<-decideTests(fit.main, method="separate", adjust.method="fdr", p.value=0.1, lfc=1)
+sum.res.rows<-apply(abs(res),1,sum)
+res.selected<-res[sum.res.rows!=0,] 
+print(summary(res))
+
+vennDiagram (res.selected[,1:3], cex=0.9)
+title("Genes in common between the three comparisons\n Genes selected with FDR < 0.1 and logFC > 1")
+
+```
+
+
+## Significado Biológico de los resultados
+Una vez que se obtiene una lista de genes que caracteriza la diferencia entre dos condiciones, debe interpretarse. Aunque esto requiere, por supuesto, una buena comprensión del problema biológico subyacente, un enfoque estadístico conocido como "Análisis de conjunto de genes" puede ser útil para sugerir ideas para la interpretación.
+
+Usaremos el análisis de enriquecimiento básico como se describe en implementado en el paquete ReactomePA.
+
+Incluimos todos los genes con un límite FDR no estricto FDR < 0.05 sin mínimo fold-change.
+
+Lista de genes que va a ser analizada:
+```{r}
+whichGenes_NITvsELI<-topAnnotated_NITvsELI[topAnnotated_NITvsELI["adj.P.Val"]<0.05,]
+whichGenes_NITvsSFI<-topAnnotated_NITvsSFI[topAnnotated_NITvsSFI["adj.P.Val"]<0.05,]
+whichGenes_SFIvsELI<-topAnnotated_SFIvsELI[topAnnotated_SFIvsELI["adj.P.Val"]<0.05,]
+```
+
+
+
+```{r}
+library(clusterProfiler)
+genesIn <- whichGenes_NITvsELI[3]
+table(is.na(genesIn))
+genesIn<-genesIn[!is.na(genesIn)]
+universe <- mapped_genes
+enrich.result_NITvsELI <- enrichGO(gene= genesIn,
+            universe = universe,
+            OrgDb = org.Hs.eg.db,
+            ont = "CC",
+            pAdjustMethod = "BH",
+            pvalueCutoff  = 0.05)
+   
+
+print(dim(enrich.result_NITvsELI))
+write.csv(as.data.frame(enrich.result), file ="./results/ReactomePA.Results.NITvsELI.csv", row.names = FALSE)
+
+pdf(file="./results/ReactomePA.Results.NITvsELI.pdf")
+  print(barplot(enrich.result, showCategory = 15, font.size = 4, title = "Reactome Pathway Analysis for.NITvsELI.Barplot"))
+dev.off()
+
+pdf(file = "./results/ReactomePAcnetplot.NITvsELI.pdf")
+  print(cnetplot(enrich.result, categorySize = "geneNum", showCategory = 15, vertex.label.cex = 0.75))
+dev.off()
+
+genesIn <- whichGenes_NITvsSFI[3]
+table(is.na(genesIn))
+genesIn<-genesIn[!is.na(genesIn)]
+universe <- mapped_genes
+enrich.result_NITvsSFI <- enrichGO(gene= genesIn,
+            universe = universe,
+            OrgDb = org.Hs.eg.db,
+            ont = "CC",
+            pAdjustMethod = "BH",
+            pvalueCutoff  = 0.05)
+
+print(dim(enrich.result_NITvsSFI@result))
+
+
+genesIn <- whichGenes_SFIvsELI[3]
+genesIn<-genesIn[!is.na(genesIn)]
+universe <- mapped_genes
+enrich.result_SFIvsELI<- enrichGO(gene= genesIn,
+            universe = universe,
+            OrgDb = org.Hs.eg.db,
+            ont = "CC",
+            pAdjustMethod = "BH",
+            pvalueCutoff  = 0.05)
+
+print(dim(enrich.result_SFIvsELI@result))
+
+
+```
+
